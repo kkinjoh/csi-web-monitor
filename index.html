@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0e1116">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg">
+<title>CSI Monitor</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b24; --border: #2a3242;
+    --text: #d7dde8; --dim: #7d8899; --accent: #4da3ff; --ok: #3fcf8e; --err: #ff6b6b;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", system-ui, sans-serif; font-size: 14px;
+    display: flex; flex-direction: column; gap: 10px; padding: 10px;
+    min-height: 100vh; touch-action: manipulation;
+  }
+  header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  h1 { font-size: 16px; font-weight: 600; margin-right: auto; }
+  h1 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+            background: var(--dim); margin-right: 6px; vertical-align: 1px; }
+  h1 .dot.on { background: var(--ok); }
+  button, select {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 14px; font-size: 14px;
+  }
+  button:active { background: var(--border); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #08121f; font-weight: 600; }
+  button:disabled { opacity: .4; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 6px; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; }
+  .stat .k { color: var(--dim); font-size: 11px; }
+  .stat .v { font-size: 17px; font-variant-numeric: tabular-nums; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
+  .panel h2 { font-size: 12px; color: var(--dim); font-weight: 500; margin-bottom: 6px; }
+  canvas { width: 100%; display: block; border-radius: 4px; background: #0a0d12; }
+  #log { color: var(--dim); font-family: Consolas, monospace; font-size: 12px;
+         white-space: pre-wrap; word-break: break-all; min-height: 1.5em; }
+  #log .e { color: var(--err); }
+  #banner { background: #402020; border: 1px solid var(--err); border-radius: 8px;
+            padding: 10px; display: none; }
+  .bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+         background: var(--panel); border: 1px solid var(--border);
+         border-radius: 8px; padding: 6px 8px; }
+  .bar .k { color: var(--dim); font-size: 12px; }
+  .bar label { color: var(--dim); font-size: 12px; display: flex; align-items: center; gap: 4px; }
+  .bar button, .bar select { padding: 6px 10px; font-size: 13px; }
+  body.drop { outline: 2px dashed var(--accent); outline-offset: -6px; }
+  .wifi { display: flex; flex-direction: column; gap: 6px; }
+  .wifi .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .wifi input, .wifi select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; font-size: 14px; min-width: 0; flex: 1 1 140px;
+  }
+  .wifi button { flex: 0 0 auto; }
+  .wifi .k { margin-left: auto; }
+</style>
+</head>
+<body>
+
+<div id="banner"></div>
+
+<header>
+  <h1><span class="dot" id="dot"></span>CSI Monitor</h1>
+  <select id="baud">
+    <option value="115200">115200</option>
+    <option value="460800">460800</option>
+    <option value="921600" selected>921600</option>
+    <option value="1500000">1500000</option>
+  </select>
+  <button id="btnConnect" class="primary">接続</button>
+  <button id="btnPause" disabled>一時停止</button>
+  <button id="btnRecord" disabled>記録</button>
+</header>
+
+<div class="bar">
+  <span class="k">再生</span>
+  <input type="file" id="fileReplay" accept=".bin,application/octet-stream" hidden>
+  <button id="btnOpen">.bin を開く</button>
+  <select id="speed" title="再生速度">
+    <option value="0.5">0.5x</option>
+    <option value="1" selected>1x</option>
+    <option value="2">2x</option>
+    <option value="4">4x</option>
+    <option value="0">最速</option>
+  </select>
+  <label><input type="checkbox" id="loop" checked>ループ</label>
+  <button id="btnReplayStop" disabled>停止</button>
+  <span class="k" id="replayPos"></span>
+</div>
+
+<div class="panel" id="rolePanel">
+  <h2>ロール（1 つのファームで切り替え / firmware/csi_node）</h2>
+  <div class="wifi">
+    <div class="row">
+      <select id="role" title="変更すると ESP32 が再起動します">
+        <option value="collector">collector — AP に繋いで CSI を取る</option>
+        <option value="recv">recv — ESP-NOW を受けて CSI を取る</option>
+        <option value="send">send — ESP-NOW を送る（CSI は出ない）</option>
+      </select>
+      <button id="btnSetRole" disabled title="NVS に保存して再起動します">このロールにする</button>
+      <span class="k" id="roleState">–</span>
+    </div>
+    <div class="row" id="nowRow">
+      <span class="k">ESP-NOW</span>
+      <select id="nowBand" title="recv と send で必ず揃えること">
+        <option value="2g">2.4GHz</option>
+        <option value="5g">5GHz (C5のみ)</option>
+      </select>
+      <input id="nowCh" type="number" min="1" max="177" placeholder="ch" title="recv/send で同じ値に">
+      <select id="nowBw">
+        <option value="ht20">HT20</option>
+        <option value="ht40">HT40</option>
+      </select>
+      <button id="btnSetNow" disabled title="NVS に保存。反映には再起動が必要">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="panel" id="wifiPanel">
+  <h2>Wi-Fi 設定（接続中の ESP32 に送る / docs/csi_ctrl.md）</h2>
+  <div class="wifi">
+    <div class="row">
+      <button id="btnScan" disabled>AP をスキャン</button>
+      <button id="btnStatus" disabled>状態を取得</button>
+      <button id="btnForget" disabled title="保存済み設定を消す。次回起動からビルド時の既定値に戻る">設定を消去</button>
+      <span class="k" id="wifiState">未接続</span>
+    </div>
+    <select id="apList" size="1" disabled><option value="">（スキャン結果）</option></select>
+    <div class="row">
+      <span class="k">バンド</span>
+      <select id="band" title="同一 SSID が 2.4/5GHz 両方に出ている AP でどちらを使うか">
+        <option value="auto" selected>自動（電波の強い方）</option>
+        <option value="5g">5GHz のみ</option>
+        <option value="2g">2.4GHz のみ</option>
+      </select>
+      <button id="btnSetBand" disabled title="保存済みの AP のまま、使うバンドだけ切り替える（パスワード再入力不要）">バンドのみ変更</button>
+      <span class="k" id="bssidPin"></span>
+    </div>
+    <div class="row">
+      <input id="ssid" type="text" placeholder="SSID" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <input id="pass" type="password" placeholder="パスワード（オープン AP なら空）" autocomplete="off">
+      <button id="btnSetAp" class="primary" disabled>この AP に接続</button>
+    </div>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="k">フレーム/秒</div><div class="v" id="sFps">–</div></div>
+  <div class="stat"><div class="k">総フレーム</div><div class="v" id="sTotal">0</div></div>
+  <div class="stat"><div class="k">欠落</div><div class="v" id="sDrop">0</div></div>
+  <div class="stat"><div class="k">RSSI</div><div class="v" id="sRssi">–</div></div>
+  <div class="stat"><div class="k">チップ</div><div class="v" id="sChip">–</div></div>
+  <div class="stat"><div class="k">ch / 帯域</div><div class="v" id="sCh">–</div></div>
+  <div class="stat"><div class="k">変調</div><div class="v" id="sSig">–</div></div>
+  <div class="stat"><div class="k">サブキャリア</div><div class="v" id="sSub">–</div></div>
+</div>
+
+<div class="panel">
+  <h2>振幅スペクトル（現在フレーム）</h2>
+  <canvas id="spectrum" height="140"></canvas>
+</div>
+
+<div class="panel">
+  <h2>ウォーターフォール（時間 × サブキャリア, 色=振幅）</h2>
+  <canvas id="waterfall" height="260"></canvas>
+</div>
+
+<div class="panel"><div id="log"></div></div>
+
+<script src="csi_proto.js"></script>
+<script src="usb_serial.js"></script>
+<script src="transport.js"></script>
+<script>
+"use strict";
+
+// ---------- 状態 ----------
+let port = null;          // transport.js の port ({name,read,write,close})
+let reading = false;      // 読み取りループ稼働中か
+let paused = false;
+let parser = new csiProto.FrameParser({ onText: onSerialText });
+let lastSeq = null;
+let total = 0, dropped = 0;
+let fpsCount = 0, fpsValue = 0;
+let lastFrame = null;
+let pendingRows = [];     // rAF でまとめて描く振幅行
+let maxAmp = 1;           // オートスケール（減衰付き）
+let recording = null;     // 記録中なら Uint8Array チャンクの配列
+let replay = null;        // 再生中なら {frames, offsets, i, clockUs, last, timer, name}
+let wifiInfo = {};        // ESP の Wi-Fi 状態 (制御チャネルのイベントで更新)
+let ctrlEnabled = false;  // 制御コマンドを送れる状態か (接続中のみ true)
+
+const backend = transport.kind();   // "serial" (PC) / "usb" (Android) / null
+
+const $ = (id) => document.getElementById(id);
+const logEl = $("log");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function log(msg, isErr) {
+  const line = document.createElement("div");
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  if (isErr) line.className = "e";
+  logEl.prepend(line);
+  while (logEl.childNodes.length > 8) logEl.removeChild(logEl.lastChild);
+}
+
+// ---------- Service Worker (PWA インストール後のオフライン起動用) ----------
+// これを登録しておくと「ホーム画面に追加」でインストールできるようになり、
+// 2回目以降は PC (adb reverse) も Wi-Fi も無しで起動できる。詳細は sw.js 冒頭のコメント。
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("sw.js").catch((e) => log(`Service Worker 登録失敗: ${e.message}`, true));
+}
+
+// ---------- 接続バックエンドの可否チェック ----------
+// どちらも無くても .bin の再生はできるので、そこだけは使えると明示しておく。
+if (!backend) {
+  const b = $("banner");
+  b.style.display = "block";
+  b.textContent = (window.isSecureContext
+    ? "このブラウザは Web Serial も WebUSB も持っていません（iOS は不可）。実機に繋ぐには PC / Android の Chrome / Edge を使ってください。"
+    : "Web Serial / WebUSB には HTTPS (または localhost) が必要です。実機に繋ぐには https か localhost で開いてください。")
+    + " 記録済み .bin の再生はこのままでも可能です。";
+  $("btnConnect").disabled = true;
+}
+
+// ---------- ボーレートの保持 ----------
+// リロードのたびに選び直さずに済むよう origin ごとに覚える。
+const savedBaud = localStorage.getItem("csi.baud");
+if (savedBaud) $("baud").value = savedBaud;
+$("baud").onchange = () => localStorage.setItem("csi.baud", $("baud").value);
+
+// ---------- 接続 / 切断 ----------
+// 実際の口は transport.js が握る (PC=Web Serial / Android=WebUSB)。
+// 一度許可すればその許可は origin 単位で永続し、以降はダイアログ無しで
+// 取り直せる。これが効くのは origin が変わらない場合に限るので、開発時は
+// adb reverse で localhost:8000 に固定すること (scripts\Serve-WebMonitor.ps1)。
+
+// prompt=false なら許可済みポートが無いとき何もせず false を返す（自動接続用）。
+async function connect({ prompt = true } = {}) {
+  if (replay) stopReplay();
+  if (!backend) return false;
+  const baud = parseInt($("baud").value, 10);
+
+  try {
+    if (prompt) {
+      // 手動接続はユーザー操作(クリック)から直接 requestPort() を呼ぶこと。
+      // 手前に await を挟むとジェスチャーが失効するブラウザがある。
+      port = await transport.requestPort(baud);
+    } else {
+      // 自動再接続はジェスチャー不要な getPorts()/getDevices() 側だけを使う。
+      port = await transport.permittedPort(baud);
+      if (!port) return false;
+    }
+  } catch (e) {
+    // 選択ダイアログのキャンセルは NotFoundError。これは無視する。
+    if (e.name !== "NotFoundError") log(`接続失敗: ${e.message}`, true);
+    port = null;
+    return false;
+  }
+
+  log(`接続: ${port.name} (${port.label()}) @ ${baud}`);
+  $("dot").classList.add("on");
+  $("btnConnect").textContent = "切断";
+  $("btnPause").disabled = false;
+  $("btnRecord").disabled = false;
+  setCtrlEnabled(true);
+  resetStats();
+  reading = true;
+  readLoop();
+  // 繋がった直後の状態をホスト側から一度取りにいく
+  // (ESP がすでに起動済みで boot イベントを撃ち終えている場合に必要)
+  sendCmd({ cmd: "status" });
+  return true;
+}
+
+async function disconnect() {
+  reading = false;
+  if (port) { await port.close(); port = null; }
+  $("dot").classList.remove("on");
+  $("btnConnect").textContent = "接続";
+  $("btnPause").disabled = true;
+  paused = false;
+  $("btnPause").textContent = "一時停止";
+  stopRecording();
+  $("btnRecord").disabled = true;
+  setCtrlEnabled(false);
+  log("切断しました");
+}
+
+if (backend) {
+  transport.onPresenceChange((connected) => {
+    if (connected) {
+      // ESP を挿し直したら勝手に繋ぎ直す（許可済みなのでダイアログは出ない）
+      if (!port && !replay) connect({ prompt: false });
+    } else if (port) {
+      port = null;
+      disconnect();
+    }
+  });
+  // ページ読み込み時の自動接続
+  connect({ prompt: false }).then((ok) => {
+    if (!ok) log(`「接続」でデバイスを選択してください（初回のみ / ${backend === "serial" ? "Web Serial" : "WebUSB"}）`);
+  });
+}
+
+// ---------- 読み取りループ ----------
+// port.read() はバックエンド差を吸収済み (transport.js)。
+// Uint8Array (0 長もあり得る) を返し、相手が閉じたら null。
+async function readLoop() {
+  while (reading && port) {
+    let chunk;
+    try {
+      chunk = await port.read();
+    } catch (e) {
+      if (reading) { log(`読み取りエラー: ${e.message}`, true); disconnect(); }
+      return;
+    }
+    if (chunk === null) {          // ストリームが閉じた (抜線など)
+      if (reading) disconnect();
+      return;
+    }
+    if (chunk.length === 0) continue;
+    if (recording) recording.push(chunk.slice());
+    if (paused) continue;
+    for (const frame of parser.feed(chunk)) onFrame(frame);
+  }
+}
+
+function onFrame(f) {
+  total++; fpsCount++;
+  if (lastSeq !== null) {
+    const gap = (f.seq - lastSeq - 1) >>> 0;
+    if (gap > 0 && gap < 1000) dropped += gap;
+  }
+  lastSeq = f.seq;
+  lastFrame = f;
+  const amp = csiProto.amplitudes(f);
+  let m = 0;
+  for (let i = 0; i < amp.length; i++) if (amp[i] > m) m = amp[i];
+  maxAmp = Math.max(maxAmp * 0.999, m, 1);
+  pendingRows.push(amp);
+  if (pendingRows.length > 200) pendingRows.splice(0, pendingRows.length - 200); // 描画が追いつかない場合は間引く
+}
+
+function resetStats() {
+  parser = new csiProto.FrameParser({ onText: onSerialText });
+  lastSeq = null; total = 0; dropped = 0; fpsCount = 0; fpsValue = 0;
+  lastFrame = null; pendingRows = []; maxAmp = 1;
+}
+
+// ---------- 記録 (.bin ダウンロード → Python/monitor で解析可能) ----------
+function stopRecording() {
+  if (!recording) return;
+  const blob = new Blob(recording, { type: "application/octet-stream" });
+  recording = null;
+  $("btnRecord").textContent = "記録";
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `csi-capture-${Date.now()}.bin`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  log(`記録を保存 (${(blob.size / 1024).toFixed(1)} kB)`);
+}
+
+$("btnRecord").onclick = () => {
+  if (recording) { stopRecording(); }
+  else { recording = []; $("btnRecord").textContent = "記録停止"; log("記録開始"); }
+};
+
+// ---------- 再生 (.bin リプレイ) ----------
+// 「記録」で保存した .bin を読み込み、収録時のタイムスタンプ通りに onFrame へ流す。
+// ESP もスマホも adb も要らないので、解析・描画側の変更は PC の Chrome だけで
+// 詰められる。ループ再生にすると同じ区間を何度も見返せる。
+
+const REPLAY_CHUNK = 32768;         // FrameParser に一度に食わせる量（下の注記参照）
+const REPLAY_MAX_GAP_US = 1000000;  // これを超える間隔は u32 ラップ or 収録中断とみなす
+const REPLAY_FALLBACK_US = 10000;   // その場合に使う既定間隔 (100Hz = csi_send のレート)
+const REPLAY_MAX_PER_TICK = 2000;   // 1 tick で流す上限。UI を固めないための保険
+
+// FrameParser.feed は内部バッファを都度 slice するので、巨大な Uint8Array を
+// 一度に渡すとフレームごとに全長コピーが走って O(n^2) になる。分割して食わせる。
+function decodeAll(bytes) {
+  // ここは onText を付けない。記録した .bin には制御 JSON も混ざっているが、
+  // 再生でそれを再演するとライブの Wi-Fi 状態表示が上書きされてしまうため。
+  const p = new csiProto.FrameParser();
+  const frames = [];
+  for (let off = 0; off < bytes.length; off += REPLAY_CHUNK) {
+    const end = Math.min(off + REPLAY_CHUNK, bytes.length);
+    for (const f of p.feed(bytes.subarray(off, end))) frames.push(f);
+  }
+  return frames;
+}
+
+// 先頭フレームからの相対再生時刻 [µs] を作る。
+function frameOffsets(frames) {
+  const off = new Float64Array(frames.length);
+  let acc = 0;
+  for (let i = 1; i < frames.length; i++) {
+    let d = (frames[i].timestampUs - frames[i - 1].timestampUs) >>> 0; // u32 差分
+    if (d === 0 || d > REPLAY_MAX_GAP_US) d = REPLAY_FALLBACK_US;
+    acc += d;
+    off[i] = acc;
+  }
+  return off;
+}
+
+function startReplay(frames, name) {
+  if (port) { log("再生するには先に切断してください", true); return; }
+  if (frames.length === 0) { log("CSI フレームが 1 つも見つかりません", true); return; }
+  stopReplay();
+  resetStats();
+  paused = false;
+  $("btnPause").textContent = "一時停止";
+  replay = {
+    frames, offsets: frameOffsets(frames), name,
+    i: 0, clockUs: 0, last: performance.now(), timer: null,
+  };
+  replay.timer = setInterval(pumpReplay, 10);
+  $("btnReplayStop").disabled = false;
+  $("btnPause").disabled = false;
+  $("btnConnect").disabled = true;
+  $("dot").classList.add("on");
+  const durS = replay.offsets[frames.length - 1] / 1e6;
+  log(`再生開始: ${name} (${frames.length} フレーム / ${durS.toFixed(1)} 秒)`);
+}
+
+function stopReplay() {
+  if (!replay) return;
+  clearInterval(replay.timer);
+  replay = null;
+  $("btnReplayStop").disabled = true;
+  $("btnConnect").disabled = !backend;
+  $("replayPos").textContent = "";
+  if (!port) {
+    $("dot").classList.remove("on");
+    $("btnPause").disabled = true;
+    paused = false;
+    $("btnPause").textContent = "一時停止";
+  }
+}
+
+function emitUntil(untilUs) {
+  let n = 0;
+  while (replay.i < replay.frames.length && replay.offsets[replay.i] <= untilUs) {
+    onFrame(replay.frames[replay.i++]);
+    if (++n >= REPLAY_MAX_PER_TICK) break;
+  }
+}
+
+function pumpReplay() {
+  if (!replay) return;
+  const now = performance.now();
+  const dt = now - replay.last;
+  replay.last = now;                       // paused でも進めておく（再開時に飛ばないように）
+  if (paused) return;
+
+  const speed = parseFloat($("speed").value);
+  if (speed === 0) {
+    // 最速: 上限まで一気に流し、仮想時計は再生位置に同期させる
+    //（速度を 1x に戻したとき待ちが発生しないように）
+    emitUntil(Infinity);
+    if (replay.i < replay.frames.length) replay.clockUs = replay.offsets[replay.i];
+  } else {
+    replay.clockUs += dt * 1000 * speed;
+    emitUntil(replay.clockUs);
+  }
+
+  if (replay.i >= replay.frames.length) {
+    if ($("loop").checked) {
+      replay.i = 0;
+      replay.clockUs = 0;
+      lastSeq = null;                       // seq が巻き戻るので欠落判定をリセット
+    } else {
+      log(`再生終了: ${replay.name}`);
+      stopReplay();
+    }
+  }
+}
+
+async function loadAndReplay(file) {
+  log(`読み込み中: ${file.name} (${(file.size / 1024).toFixed(0)} kB)`);
+  try {
+    const frames = decodeAll(new Uint8Array(await file.arrayBuffer()));
+    startReplay(frames, file.name);
+  } catch (e) {
+    log(`読み込み失敗: ${e.message}`, true);
+  }
+}
+
+$("btnOpen").onclick = () => $("fileReplay").click();
+$("fileReplay").onchange = (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";   // 同じファイルを続けて選び直せるようにクリア
+  if (file) loadAndReplay(file);
+};
+$("btnReplayStop").onclick = () => { log("再生停止"); stopReplay(); };
+
+// PC ではドラッグ&ドロップでも開けるようにする
+document.addEventListener("dragover", (e) => { e.preventDefault(); document.body.classList.add("drop"); });
+document.addEventListener("dragleave", () => document.body.classList.remove("drop"));
+document.addEventListener("drop", (e) => {
+  e.preventDefault();
+  document.body.classList.remove("drop");
+  const file = e.dataTransfer.files[0];
+  if (file) loadAndReplay(file);
+});
+
+$("btnConnect").onclick = () => (port ? disconnect() : connect());
+$("btnPause").onclick = () => {
+  paused = !paused;
+  $("btnPause").textContent = paused ? "再開" : "一時停止";
+};
+
+// ---------- 制御チャネル (docs/csi_ctrl.md) ----------
+// CSI と同じシリアルリンクを共有する。ホスト -> デバイスは改行区切りの JSON、
+// デバイス -> ホストも同じく JSON 行で、CSI のバイナリフレームの隙間に混ざる。
+// FrameParser の onText がその「フレームでないバイト」を行にして渡してくれる。
+
+const AUTH_NAMES = {
+  0: "open", 1: "WEP", 2: "WPA", 3: "WPA2", 4: "WPA/WPA2",
+  5: "EAP", 6: "WPA3", 7: "WPA2/WPA3", 8: "WAPI",
+};
+
+// 1 行の JSON を送る。port が無い(再生中など)ときは何もしない。
+async function sendCmd(obj) {
+  if (!port) { log("ESP32 に接続していません", true); return false; }
+  try {
+    await port.write(new TextEncoder().encode(JSON.stringify(obj) + "\n"));
+    return true;
+  } catch (e) {
+    log(`コマンド送信に失敗: ${e.message}`, true);
+    return false;
+  }
+}
+
+// FrameParser が拾った非フレーム行。JSON なら制御イベント、それ以外は ESP のログ。
+function onSerialText(line) {
+  let msg = null;
+  if (line.startsWith("{")) {
+    try { msg = JSON.parse(line); } catch (_) { msg = null; }
+  }
+  if (msg === null || typeof msg.evt !== "string") {
+    log(`ESP: ${line}`);   // ログ行はそのまま出す（デバッグで効く）
+    return;
+  }
+  handleCtrlEvent(msg);
+}
+
+function handleCtrlEvent(m) {
+  switch (m.evt) {
+    case "boot":
+      wifiInfo = { state: "idle", ssid: m.ssid, src: m.src, role: m.role };
+      log(`ESP 起動: ssid=${m.ssid || "(未設定)"} (${m.src === "nvs" ? "保存済み" : "ビルド時既定"})`);
+      if (m.ssid && !$("ssid").value) $("ssid").value = m.ssid;
+      break;
+    case "wifi":
+      wifiInfo = { ...wifiInfo, state: m.state, ssid: m.ssid };
+      if (m.state !== "connected") wifiInfo.ip = undefined;
+      log(`Wi-Fi: ${m.state}${m.ssid ? ` (${m.ssid})` : ""}${m.reason !== undefined ? ` reason=${m.reason}` : ""}`,
+          m.state === "disconnected");
+      break;
+    case "ip":
+      wifiInfo = { ...wifiInfo, ip: m.ip };
+      log(`IP 取得: ${m.ip}`);
+      break;
+    case "status":
+      wifiInfo = { ...m };
+      if (m.band) $("band").value = m.band;
+      renderRole();
+      log(`状態: ${m.state} ssid=${m.ssid || "-"} ip=${m.ip || "-"} rssi=${m.rssi ?? "-"} ch=${m.channel ?? "-"}`);
+      break;
+    case "scan":
+      fillApList(m.aps || []);
+      break;
+    case "pong":
+      log("pong");
+      break;
+    case "ok":
+      log(`OK: ${m.cmd}`);
+      if (m.cmd === "setrole") {
+        log(`ロールを ${m.role} にしました。再起動中… 数秒後に繋ぎ直してください`, true);
+      }
+      if (m.cmd === "forget") { wifiInfo.src = "kconfig"; $("pass").value = ""; }
+      break;
+    case "err":
+      log(`ESP エラー${m.cmd ? ` (${m.cmd})` : ""}: ${m.msg}`, true);
+      break;
+    default:
+      log(`未知のイベント: ${m.evt}`);
+  }
+  renderWifiState();
+}
+
+// 一覧から選んだ AP の BSSID。同一 SSID が両バンドに出ている AP では
+// SSID だけでは無線を特定できないので、これで固定する。
+let pinnedBssid = "";
+
+function setPinned(bssid, label) {
+  pinnedBssid = bssid || "";
+  $("bssidPin").textContent = pinnedBssid ? `固定: ${label}` : "";
+}
+
+function fillApList(aps) {
+  const sel = $("apList");
+  sel.innerHTML = "";
+  sel.__aps = aps;
+  if (aps.length === 0) {
+    sel.appendChild(new Option("（AP が見つかりません）", ""));
+    sel.disabled = true;
+    log("スキャン結果: 0 件");
+    return;
+  }
+  sel.appendChild(new Option(`（${aps.length} 件。選ぶと SSID 欄に入ります）`, ""));
+  aps.forEach((ap, i) => {
+    const auth = AUTH_NAMES[ap.auth] ?? `auth${ap.auth}`;
+    const band = ap.channel >= 36 ? "5GHz" : "2.4GHz";
+    sel.appendChild(new Option(`${ap.ssid}  ${ap.rssi}dBm  ch${ap.channel} (${band})  ${auth}`, String(i)));
+  });
+  sel.disabled = false;
+  sel.size = 1;
+  log(`スキャン結果: ${aps.length} 件`);
+}
+
+function renderWifiState() {
+  const w = wifiInfo;
+  const parts = [];
+  if (w.state) parts.push(w.state);
+  if (w.ssid) parts.push(w.ssid);
+  if (w.ip) parts.push(w.ip);
+  if (w.channel !== undefined) parts.push(`ch${w.channel}${w.channel >= 36 ? "(5GHz)" : "(2.4GHz)"}`);
+  if (w.rssi !== undefined) parts.push(`${w.rssi}dBm`);
+  if (w.band) parts.push(`band=${w.band}`);
+  $("wifiState").textContent = parts.length ? parts.join(" / ") : "未接続";
+}
+
+// 制御ボタンは ESP に繋がっているときだけ有効。
+function setCtrlEnabled(on) {
+  ctrlEnabled = on;
+  for (const id of ["btnScan", "btnStatus", "btnForget", "btnSetAp", "btnSetBand", "btnSetRole", "btnSetNow"]) {
+    $(id).disabled = !on;
+  }
+  if (!on) {
+    wifiInfo = {};
+    renderWifiState();
+    renderRole();
+  }
+}
+
+// ---------- ロール ----------
+// ロールごとに Wi-Fi の初期化が根本的に違うので、ESP 側は NVS に保存して
+// 再起動する。切り替え後は接続が一度切れるため、繋ぎ直しの案内を出す。
+const ROLE_LABEL = { collector: "collector", recv: "recv", send: "send" };
+
+function renderRole() {
+    const r = wifiInfo.role;
+    $("roleState").textContent = r ? `現在: ${ROLE_LABEL[r] || r}` : "–";
+    if (r) $("role").value = r;
+    // AP 設定は collector のときだけ意味がある
+    const isCollector = !r || r === "collector";
+    $("wifiPanel").style.opacity = isCollector ? "" : "0.45";
+    // 未接続なら触らない。setCtrlEnabled(false) が無効化した直後に
+    // ここで再有効化してしまうため (実際に踏んだ)。
+    for (const id of ["btnScan", "btnSetAp", "btnForget", "btnSetBand"]) {
+      $(id).disabled = !ctrlEnabled || !isCollector;
+    }
+    // ESP-NOW 設定は recv/send のときだけ
+    $("nowRow").style.opacity = (r === "recv" || r === "send") ? "" : "0.45";
+}
+
+$("btnSetRole").onclick = () => {
+  const r = $("role").value;
+  log(`ロールを ${r} に変更して再起動します…`);
+  sendCmd({ cmd: "setrole", role: r });
+};
+$("btnSetNow").onclick = () => {
+  const msg = { cmd: "setnow", band: $("nowBand").value, bw: $("nowBw").value };
+  const ch = parseInt($("nowCh").value, 10);
+  if (Number.isFinite(ch)) msg.channel = ch;
+  log("ESP-NOW 設定を保存します（反映には再起動が必要）");
+  sendCmd(msg);
+};
+
+$("btnScan").onclick = async () => {
+  log("スキャン中… (この間 CSI は途切れます)");
+  await sendCmd({ cmd: "scan" });
+};
+$("btnStatus").onclick = () => sendCmd({ cmd: "status" });
+$("btnForget").onclick = () => sendCmd({ cmd: "forget" });
+$("btnSetBand").onclick = () => {
+  log(`バンドを ${$("band").value} に切り替え中… (繋ぎ直すので数秒かかります)`);
+  sendCmd({ cmd: "setband", band: $("band").value });
+};
+$("btnSetAp").onclick = () => {
+  const ssid = $("ssid").value.trim();
+  if (!ssid) { log("SSID を入力してください", true); return; }
+  const msg = { cmd: "setap", ssid, password: $("pass").value, band: $("band").value };
+  // 一覧から選んだ AP があればその無線に固定する。
+  // (SSID を手入力すると下の input ハンドラで固定が外れる)
+  if (pinnedBssid) msg.bssid = pinnedBssid;
+  sendCmd(msg);
+};
+
+// SSID を手入力したら BSSID 固定を解除する
+$("ssid").addEventListener("input", () => setPinned("", ""));
+$("apList").onchange = (e) => {
+  const aps = $("apList").__aps || [];
+  const ap = aps[parseInt(e.target.value, 10)];
+  if (!ap) { setPinned("", ""); return; }
+  $("ssid").value = ap.ssid;
+  // その AP の無線に固定する。ch から推測してバンド選択も合わせておく。
+  setPinned(ap.bssid, `${ap.bssid} (ch${ap.channel})`);
+  $("band").value = ap.channel >= 36 ? "5g" : "2g";
+};
+// SSID / パスワード欄で Enter を押したら接続
+for (const id of ["ssid", "pass"]) {
+  $(id).addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !$("btnSetAp").disabled) $("btnSetAp").click();
+  });
+}
+
+// ---------- 描画 ----------
+const specCv = $("spectrum"), specCtx = specCv.getContext("2d");
+const wfCv = $("waterfall"), wfCtx = wfCv.getContext("2d");
+
+// カラーマップ LUT (dark→blue→cyan→yellow→red)
+const LUT = (() => {
+  const anchors = [[10, 13, 30], [30, 80, 200], [40, 200, 220], [240, 220, 60], [255, 70, 40]];
+  const lut = new Uint8Array(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = (i / 255) * (anchors.length - 1);
+    const k = Math.min(anchors.length - 2, Math.floor(t));
+    const f = t - k;
+    for (let c = 0; c < 3; c++) lut[i * 3 + c] = anchors[k][c] + (anchors[k + 1][c] - anchors[k][c]) * f;
+  }
+  return lut;
+})();
+
+function fitCanvas(cv) {
+  const w = cv.clientWidth | 0;
+  if (w > 0 && cv.width !== w) cv.width = w;
+}
+
+function drawSpectrum(amp) {
+  fitCanvas(specCv);
+  const { width: W, height: H } = specCv;
+  specCtx.clearRect(0, 0, W, H);
+  if (!amp || amp.length < 2) return;
+  specCtx.strokeStyle = "#4da3ff";
+  specCtx.lineWidth = 1.5;
+  specCtx.beginPath();
+  for (let i = 0; i < amp.length; i++) {
+    const x = (i / (amp.length - 1)) * W;
+    const y = H - (amp[i] / maxAmp) * (H - 6) - 3;
+    i === 0 ? specCtx.moveTo(x, y) : specCtx.lineTo(x, y);
+  }
+  specCtx.stroke();
+}
+
+function drawWaterfallRows(rows) {
+  fitCanvas(wfCv);
+  const { width: W, height: H } = wfCv;
+  const k = rows.length;
+  if (k === 0 || W === 0) return;
+  wfCtx.drawImage(wfCv, 0, k, W, H - k, 0, 0, W, H - k); // k 行分上へスクロール
+  const img = wfCtx.createImageData(W, k);
+  for (let r = 0; r < k; r++) {
+    const amp = rows[r];
+    for (let x = 0; x < W; x++) {
+      const v = amp[Math.min(amp.length - 1, ((x / W) * amp.length) | 0)];
+      const idx = Math.min(255, ((v / maxAmp) * 255) | 0) * 3;
+      const o = (r * W + x) * 4;
+      img.data[o] = LUT[idx]; img.data[o + 1] = LUT[idx + 1]; img.data[o + 2] = LUT[idx + 2]; img.data[o + 3] = 255;
+    }
+  }
+  wfCtx.putImageData(img, 0, H - k);
+}
+
+function render() {
+  if (pendingRows.length > 0) {
+    drawWaterfallRows(pendingRows.splice(0, Math.min(pendingRows.length, 20)));
+    drawSpectrum(csiProto.amplitudes(lastFrame));
+  }
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+
+// ---------- 統計表示 (4Hz) & FPS (1Hz) ----------
+setInterval(() => { fpsValue = fpsCount; fpsCount = 0; }, 1000);
+setInterval(() => {
+  $("sFps").textContent = (port || replay) ? fpsValue : "–";
+  $("replayPos").textContent = replay
+    ? `${replay.i} / ${replay.frames.length}`
+    : "";
+  $("sTotal").textContent = total;
+  $("sDrop").textContent = dropped;
+  const f = lastFrame;
+  $("sRssi").textContent = f ? `${f.rssi} dBm` : "–";
+  $("sChip").textContent = f ? (csiProto.CHIP_NAMES[f.chip] || f.chip) : "–";
+  $("sCh").textContent = f ? `${f.channel} / ${f.bandwidth ? 40 : 20}MHz` : "–";
+  $("sSig").textContent = f ? `${csiProto.SIG_NAMES[f.sigMode] || f.sigMode} mcs${f.mcs}` : "–";
+  $("sSub").textContent = f ? f.nSubcarriers : "–";
+}, 250);
+</script>
+</body>
+</html>
